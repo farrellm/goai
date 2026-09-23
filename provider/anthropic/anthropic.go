@@ -414,6 +414,9 @@ func (m *chatModel) DoGenerate(ctx context.Context, params provider.GeneratePara
 
 	if rfMode {
 		extractResponseFormatResult(result)
+		// The synthetic response-format tool call is not a real turn to
+		// replay; leave replay to the aggregate fields as before.
+		result.ReasoningParts = nil
 	}
 	return result, nil
 }
@@ -1568,7 +1571,7 @@ func parseSSE(ctx context.Context, body io.Reader, out chan<- provider.StreamChu
 				case "thinking_delta":
 					text, _ := delta["thinking"].(string)
 					if text != "" {
-						if !provider.TrySend(ctx, out, provider.StreamChunk{Type: provider.ChunkReasoning, Text: text, Metadata: map[string]any{"blockId": blockID}}) {
+if !provider.TrySend(ctx, out, provider.StreamChunk{Type: provider.ChunkReasoning, Text: text, Metadata: map[string]any{"blockId": blockID}}) {
 							return
 						}
 					}
@@ -2265,6 +2268,13 @@ func parseResponse(body []byte) (*provider.GenerateResult, error) {
 				providerMeta["citations"] = append(existingCitations, citations...)
 			}
 		case "thinking":
+			// Every thinking block goes back verbatim with its own signature,
+			// including omitted-display blocks whose text is empty.
+			part := provider.Part{Type: provider.PartReasoning, Text: block.Thinking, ProviderOptions: map[string]any{}}
+			if block.Signature != "" {
+				part.ProviderOptions["signature"] = block.Signature
+			}
+			result.ReasoningParts = append(result.ReasoningParts, part)
 			if block.Thinking != "" {
 				// Reasoning text is not appended to result.Text -- it's metadata.
 				reasoningParts = append(reasoningParts, block.Thinking)
@@ -2286,6 +2296,7 @@ func parseResponse(body []byte) (*provider.GenerateResult, error) {
 			providerMeta["reasoning"] = append(reasoning, map[string]any{
 				"type": "redacted_thinking", "data": block.Data,
 			})
+			result.ReasoningParts = append(result.ReasoningParts, provider.Part{Type: provider.PartReasoning, ProviderOptions: map[string]any{"redactedData": block.Data}})
 		case "tool_use", "server_tool_use":
 			result.ToolCalls = append(result.ToolCalls, provider.ToolCall{
 				ID:    block.ID,
