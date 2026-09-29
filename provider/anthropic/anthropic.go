@@ -1483,6 +1483,7 @@ func parseSSE(ctx context.Context, body io.Reader, out chan<- provider.StreamChu
 			if cb, ok := event["content_block"].(map[string]any); ok {
 				cbType, _ := cb["type"].(string)
 				isResultBlock = false
+				blockID := blockIDOf(event)
 				// If pending server_tool_use calls await their result blocks and
 				// the next block is neither a result nor another server tool,
 				// their results are not coming this step: flush without
@@ -1531,6 +1532,7 @@ func parseSSE(ctx context.Context, body io.Reader, out chan<- provider.StreamChu
 							Text: "",
 							Metadata: map[string]any{
 								"redactedData": data,
+								"blockId":      blockID,
 							},
 						}) {
 							return
@@ -1554,6 +1556,7 @@ func parseSSE(ctx context.Context, body io.Reader, out chan<- provider.StreamChu
 		case "content_block_delta":
 			if delta, ok := event["delta"].(map[string]any); ok {
 				deltaType, _ := delta["type"].(string)
+				blockID := blockIDOf(event)
 				switch deltaType {
 				case "text_delta":
 					text, _ := delta["text"].(string)
@@ -1565,7 +1568,7 @@ func parseSSE(ctx context.Context, body io.Reader, out chan<- provider.StreamChu
 				case "thinking_delta":
 					text, _ := delta["thinking"].(string)
 					if text != "" {
-						if !provider.TrySend(ctx, out, provider.StreamChunk{Type: provider.ChunkReasoning, Text: text}) {
+						if !provider.TrySend(ctx, out, provider.StreamChunk{Type: provider.ChunkReasoning, Text: text, Metadata: map[string]any{"blockId": blockID}}) {
 							return
 						}
 					}
@@ -1577,6 +1580,7 @@ func parseSSE(ctx context.Context, body io.Reader, out chan<- provider.StreamChu
 							Text: "",
 							Metadata: map[string]any{
 								"signature": sig,
+								"blockId":   blockID,
 							},
 						}) {
 							return
@@ -2089,6 +2093,17 @@ func streamEventIndex(event map[string]any) (int, error) {
 		return 0, fmt.Errorf("anthropic: invalid content block index %v", f)
 	}
 	return int(f), nil
+}
+
+// blockIDOf returns an SSE event's content block index as a string, for use as
+// reasoning-chunk metadata. A missing or malformed index names no real block
+// and yields "-1"; consumers can still group deltas, just not by position.
+func blockIDOf(event map[string]any) string {
+	idx, err := streamEventIndex(event)
+	if err != nil {
+		idx = -1
+	}
+	return strconv.Itoa(idx)
 }
 
 // appendStringField concatenates a streamed delta onto a content block field,
