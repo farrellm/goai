@@ -30,6 +30,19 @@ var orderedTurn = []map[string]any{
 	{"type": "tool_use", "id": "toolu_2", "name": "lookup", "input": map[string]any{"q": "two"}},
 }
 
+// orderedTurnReplayed is orderedTurn after ReorderAssistantParts moves the
+// tool calls to the end, keeping thinking/text in their original relative order.
+var orderedTurnReplayed = []map[string]any{
+	{"type": "redacted_thinking", "data": "enc-0"},
+	{"type": "thinking", "thinking": "Reasoning about the lookup.", "signature": "sig-a"},
+	{"type": "thinking", "thinking": "", "signature": "sig-b"},
+	{"type": "text", "text": "Looking that up."},
+	{"type": "thinking", "thinking": "Checking the first source.", "signature": "sig-c"},
+	{"type": "thinking", "thinking": "", "signature": "sig-d"},
+	{"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": map[string]any{"q": "one"}},
+	{"type": "tool_use", "id": "toolu_2", "name": "lookup", "input": map[string]any{"q": "two"}},
+}
+
 // leadingTurn is an assistant turn whose thinking blocks all precede the
 // tool_use, as every model before Claude 5.x produces: consecutive blocks,
 // each with its own signature, one of them empty (omitted display).
@@ -82,6 +95,14 @@ func writeSSE(w http.ResponseWriter, blocks []map[string]any, stopReason string)
 	event(map[string]any{"type": "message_stop"})
 }
 
+func writeJSON(w http.ResponseWriter, blocks []map[string]any, stopReason string) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"id": "msg", "model": "claude-opus-5-5", "type": "message", "role": "assistant",
+		"content": blocks, "stop_reason": stopReason, "usage": map[string]any{"input_tokens": 1, "output_tokens": 1},
+	})
+}
+
 // replayCase selects the transport a replay test runs over.
 type replayCase struct {
 	name          string
@@ -118,7 +139,7 @@ func runReplay(t *testing.T, tc replayCase, turn []map[string]any) (replayed []a
 		if body["stream"] == true {
 			writeSSE(w, blocks, stop)
 		} else {
-			t.Error("non-streaming request")
+			writeJSON(w, blocks, stop)
 		}
 	}))
 	defer srv.Close()
@@ -170,14 +191,31 @@ func assertReplayed(t *testing.T, replayed []any, turn []map[string]any) {
 
 // TestReplayLeadingThinking checks that the tool loop sends back every
 // thinking block of a turn -- each with its own signature, empty ones and
-// redacted ones included -- on every transport.
+// redacted ones included -- over every transport.
 func TestReplayLeadingThinking(t *testing.T) {
 	for _, tc := range []replayCase{
 		{name: "stream", stream: true},
+		{name: "generate/json"},
+		{name: "generate/sse", autoStreaming: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			replayed, _ := runReplay(t, tc, leadingTurn)
 			assertReplayed(t, replayed, leadingTurn)
+		})
+	}
+}
+
+// TestReplayOrderedThinking checks that a turn with thinking interleaved
+// between text blocks replays with the thinking/text order intact, not
+// bunched ahead of the text (the aggregate-fields path would reorder them).
+func TestReplayOrderedThinking(t *testing.T) {
+	for _, tc := range []replayCase{
+		{name: "generate/json"},
+		{name: "generate/sse", autoStreaming: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			replayed, _ := runReplay(t, tc, orderedTurn)
+			assertReplayed(t, replayed, orderedTurnReplayed)
 		})
 	}
 }

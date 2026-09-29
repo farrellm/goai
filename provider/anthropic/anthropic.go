@@ -417,6 +417,7 @@ func (m *chatModel) DoGenerate(ctx context.Context, params provider.GeneratePara
 		// The synthetic response-format tool call is not a real turn to
 		// replay; leave replay to the aggregate fields as before.
 		result.ReasoningParts = nil
+		result.Content = nil
 	}
 	return result, nil
 }
@@ -2225,11 +2226,15 @@ func parseResponse(body []byte) (*provider.GenerateResult, error) {
 	// matching result block. Keyed by ID (not a single slot) so parallel
 	// server tools each get their own result block.
 	serverToolIdxByID := make(map[string]int)
+	// Same map for the ordered Content snapshot, so the result block lands on
+	// the PartToolCall that replay will serialize.
+	serverToolPartIdxByID := make(map[string]int)
 	for i, block := range resp.Content {
 		switch block.Type {
 		case "text":
 			if block.Text != "" {
 				textParts = append(textParts, block.Text)
+				result.Content = append(result.Content, provider.Part{Type: provider.PartText, Text: block.Text})
 			}
 			// Extract citations from text blocks.
 			if len(block.Citations) > 0 {
@@ -2275,6 +2280,7 @@ func parseResponse(body []byte) (*provider.GenerateResult, error) {
 				part.ProviderOptions["signature"] = block.Signature
 			}
 			result.ReasoningParts = append(result.ReasoningParts, part)
+			result.Content = append(result.Content, part)
 			if block.Thinking != "" {
 				// Reasoning text is not appended to result.Text -- it's metadata.
 				reasoningParts = append(reasoningParts, block.Thinking)
@@ -2297,14 +2303,22 @@ func parseResponse(body []byte) (*provider.GenerateResult, error) {
 				"type": "redacted_thinking", "data": block.Data,
 			})
 			result.ReasoningParts = append(result.ReasoningParts, provider.Part{Type: provider.PartReasoning, ProviderOptions: map[string]any{"redactedData": block.Data}})
+			result.Content = append(result.Content, provider.Part{Type: provider.PartReasoning, ProviderOptions: map[string]any{"redactedData": block.Data}})
 		case "tool_use", "server_tool_use":
 			result.ToolCalls = append(result.ToolCalls, provider.ToolCall{
 				ID:    block.ID,
 				Name:  block.Name,
 				Input: block.Input,
 			})
+			result.Content = append(result.Content, provider.Part{
+				Type:       provider.PartToolCall,
+				ToolCallID: block.ID,
+				ToolName:   block.Name,
+				ToolInput:  append(json.RawMessage(nil), block.Input...),
+			})
 			if block.Type == "server_tool_use" && block.ID != "" {
 				serverToolIdxByID[block.ID] = len(result.ToolCalls) - 1
+				serverToolPartIdxByID[block.ID] = len(result.Content) - 1
 			}
 		default:
 			if isServerToolResultBlock(block.Type) && i < len(rawContent.Content) {
@@ -2321,8 +2335,16 @@ func parseResponse(body []byte) (*provider.GenerateResult, error) {
 						tc.Metadata = map[string]any{}
 					}
 					tc.Metadata["resultBlock"] = rb
+					if pi, ok := serverToolPartIdxByID[block.ToolUseID]; ok {
+						part := &result.Content[pi]
+						if part.ProviderOptions == nil {
+							part.ProviderOptions = map[string]any{}
+						}
+						part.ProviderOptions["resultBlock"] = rb
+					}
 				}
 				delete(serverToolIdxByID, block.ToolUseID)
+				delete(serverToolPartIdxByID, block.ToolUseID)
 			}
 		}
 	}
